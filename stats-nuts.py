@@ -1,20 +1,20 @@
+import os
 from pathlib import Path
 import re
 
 import boto3
+import humanize
 from botocore import UNSIGNED
 from botocore.config import Config
 import geopandas as gpd
-from icecream import ic
 import numpy as np
 import rasterio
 from pandas import DataFrame
+import psutil
 from pyproj import Geod
 from rasterio import features, DatasetReader
 from shapely import box
 from tqdm import trange
-
-ic.configureOutput(prefix="")
 
 # Land cover classification mapping
 LAND_COVER_CLASSES = {
@@ -38,9 +38,17 @@ LAND_COVER_CLASSES_BINS.append(101)
 land_cover_names = list(LAND_COVER_CLASSES.values())
 geod = Geod(ellps="WGS84")
 s3_bucket = "esa-worldcover"
+max_memory_usage = 0
+
+
+def get_process_memory_use():
+    proc = psutil.Process(os.getpid())
+    mem_info = proc.memory_info()
+    return mem_info.rss
+
 
 def process(tif_file_names: list[str], geometry_path: Path):
-    ic("Loading boundaries")
+    print("Loading boundaries")
 
     stats_df = gpd.read_file(geometry_path.resolve(), engine="pyogrio")
 
@@ -54,9 +62,10 @@ def process(tif_file_names: list[str], geometry_path: Path):
 
     s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
 
-    ic("Processing")
+    print("Processing")
     tiff_progress_bar = trange(len(tif_file_names))
     for idx in tiff_progress_bar:
+        tiff_progress_bar.set_postfix_str(f"{humanize.naturalsize(max_memory_usage)}")
         src_file_name = Path("./.cache/" + Path(tif_file_names[idx]).name)
 
         if not src_file_name.exists():
@@ -81,12 +90,21 @@ def process(tif_file_names: list[str], geometry_path: Path):
     sum_children(stats_df)
     calculate_total_area(stats_df)
 
-    ic("Saving results")
-    stats_df.to_file("output/worldcover-nuts-stats.fgb")
-    ic("Done")
+    output_by_level(stats_df)
+    print("Done")
+
+
+def output_by_level(stats_df: DataFrame):
+    for i in range(4):
+        file_name = Path(f"output/worldcover-stats-nuts-level{i}.fgb")
+        print(f"Saving {file_name.resolve()}")
+        level = stats_df[stats_df["LEVL_CODE"] == i]
+        level.to_file(file_name)
 
 
 def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> DataFrame:
+    global max_memory_usage
+
     ds_bbox = box(*source_raster.bounds)
     src_file_name = Path(source_raster.name)
 
@@ -96,12 +114,16 @@ def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> 
     # TODO: Parallelize
     for i in geometry_progress_bar:
         region = intersections.iloc[i]
-        geometry_progress_bar.set_postfix_str(region["NUTS_ID"])
+        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+        current_memory_usage = get_process_memory_use()
+        geometry_progress_bar.set_postfix_str(f"{humanize.naturalsize(current_memory_usage)}")
+        geometry_progress_bar.set_description_str(f"{src_file_name.name} <- {region["NUTS_ID"]}")
         geom = region.geometry
         window = features.geometry_window(source_raster, [geom])
         window_xform = source_raster.window_transform(window)
         data = source_raster.read(window=window)
         clipped_geom = geom.intersection(ds_bbox)
+        max_memory_usage = max(max_memory_usage, get_process_memory_use())
 
         if clipped_geom.is_empty:
             continue
@@ -109,12 +131,15 @@ def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> 
         clipped_geom_area = (
                 abs(geod.geometry_area_perimeter(clipped_geom)[0]) / 1000000.0
         )
+        max_memory_usage = max(max_memory_usage, get_process_memory_use())
         mask = features.geometry_mask(
             [clipped_geom], [window.height, window.width], window_xform, invert=True
         )
+        max_memory_usage = max(max_memory_usage, get_process_memory_use())
         values = np.histogram(data[0][mask], bins=LAND_COVER_CLASSES_BINS)[0]
         values = values * (clipped_geom_area / np.sum(values))
         intersections.loc[region.name, land_cover_names] += values
+        max_memory_usage = max(max_memory_usage, get_process_memory_use())
 
     return intersections
 
@@ -135,7 +160,7 @@ def fix_children(stats_df: DataFrame) -> None:
 
 
 def sum_children(stats_df: DataFrame) -> None:
-    ic("Calculating parent statistics")
+    print("Calculating parent statistics")
 
     for index, nut in stats_df[stats_df["LEVL_CODE"] == 2].iterrows():
         code = nut["NUTS_ID"]
@@ -167,7 +192,7 @@ def sum_children(stats_df: DataFrame) -> None:
 
 
 def calculate_total_area(statistics: DataFrame):
-    ic("Calculating total area")
+    print("Calculating total area")
     areas = []
     unknowns = []
 
@@ -198,7 +223,6 @@ def get_tile_keys(geometry_path: Path):
     unique_tiles.to_file("output/worldcover-tiles.fgb")
 
     return tile_keys
-
 
 
 def create_directories() -> tuple[Path, Path]:
