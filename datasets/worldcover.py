@@ -3,7 +3,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 import geopandas as gpd
-import humanize
 import psutil
 from pandas import DataFrame, Series
 from pyproj import Geod
@@ -12,6 +11,12 @@ from tqdm import trange, tqdm
 from rasterio import features, DatasetReader
 import numpy as np
 from shapely import box
+import boto3
+import humanize
+from botocore import UNSIGNED
+from botocore.config import Config
+import rasterio
+
 
 # Land cover classification mapping
 LAND_COVER_CLASSES = {
@@ -39,6 +44,7 @@ s3_bucket = "esa-worldcover"
 
 type LevelFunc = Callable[[DataFrame, int], Series]
 type ChildFunc = Callable[[DataFrame, any], Series]
+type IntersectionFunc = Callable[[box, DataFrame, int], DataFrame]
 
 
 def get_process_memory_use():
@@ -47,12 +53,17 @@ def get_process_memory_use():
     return mem_info.rss
 
 
-def output_by_level(max_level: int, stats_df: DataFrame, level_fn: LevelFunc, file_path: Path):
+def output_by_level(max_level: int, stats_df: DataFrame, level_fn: LevelFunc, file_path: Path) -> list[Path]:
+    output_file_names = []
+
     for i in trange(max_level, desc=f"Saving to {str(file_path.parent)}"):
         level = stats_df[level_fn(stats_df, i)]
         suffix = file_path.suffix
         file_name = file_path.with_suffix(f".level{i:02}{suffix}")
+        output_file_names.append(file_name)
         level.to_file(file_name)
+
+    return output_file_names
 
 
 def calculate_total_area(statistics: DataFrame):
@@ -84,13 +95,12 @@ def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> 
         max_memory_usage = max(max_memory_usage, get_process_memory_use())
         current_memory_usage = get_process_memory_use()
         geometry_progress_bar.set_postfix_str(f"{humanize.naturalsize(current_memory_usage)}")
-        geometry_progress_bar.set_description_str(f"{src_file_name.name} <- {region["HYBAS_ID"]}")
+        geometry_progress_bar.set_description_str(f"{src_file_name.name}")
         geom = region.geometry
 
         try:
             window = features.geometry_window(source_raster, [geom])
         except WindowError as e:
-            print(f"Error: {e} - skipping raster")
             continue
 
         window_xform = source_raster.window_transform(window)
@@ -138,7 +148,7 @@ def create_directories() -> tuple[Path, Path]:
 
 def get_tile_keys(geom_df: DataFrame, level: int, level_fn: LevelFunc) -> list[str]:
     countries = geom_df[level_fn(geom_df, level)]
-    tile_index_df = gpd.read_file("data/esa_worldcover_grid.fgb", engine="pyogrio")
+    tile_index_df = gpd.read_file("input/esa_worldcover_grid.fgb", engine="pyogrio")
     intersected_tiles = gpd.sjoin(tile_index_df, countries, how="inner")
     unique_tiles = intersected_tiles.drop_duplicates(subset="ll_tile").copy()
 
@@ -166,3 +176,53 @@ def sum_children(stats_df: DataFrame, bottom_level: int, level_fn: LevelFunc, ch
                 continue
 
             stats_df.loc[index, land_cover_names] = children[land_cover_names].sum()
+
+
+def process(tif_file_names: list[str],
+            stats_df: DataFrame,
+            bottom_level: int,
+            level_fn: LevelFunc,
+            child_fn: ChildFunc,
+            intersection_fn: IntersectionFunc,
+            code_column_name: str,
+            output_path: Path
+            ) -> list[Path]:
+    for name in land_cover_names:
+        stats_df[name] = 0.0
+
+    stats_df["Unknown"] = 0.0
+    stats_df["total_area"] = 0.0
+
+    s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+
+    print("Processing")
+    tiff_progress_bar = trange(len(tif_file_names))
+    for idx in tiff_progress_bar:
+        tiff_progress_bar.set_postfix_str(f"{humanize.naturalsize(max_memory_usage)}")
+        src_file_name = Path("./.cache/" + Path(tif_file_names[idx]).name)
+
+        if not src_file_name.exists():
+            s3.download_file(s3_bucket, tif_file_names[idx], str(src_file_name.resolve()))
+
+        ds = rasterio.open(src_file_name)
+        ds_bbox = box(*ds.bounds)
+
+        intersections = intersection_fn(ds_bbox, stats_df, bottom_level)
+
+        if len(intersections) == 0:
+            ds.close()
+            continue
+
+        results = calculate_values(ds, intersections)
+
+        stats_df.loc[results.index] = results
+
+        ds.close()
+
+    sum_children(stats_df, bottom_level, level_fn, child_fn, code_column_name)
+    calculate_total_area(stats_df)
+
+    file_names = output_by_level(bottom_level, stats_df, level_fn, output_path)
+    print("Done")
+
+    return file_names
