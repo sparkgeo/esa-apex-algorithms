@@ -1,10 +1,7 @@
-import os
-from collections.abc import Callable
 from pathlib import Path
 
 import geopandas as gpd
-import psutil
-from pandas import DataFrame, Series
+from pandas import DataFrame
 from pyproj import Geod
 from rasterio.errors import WindowError
 from tqdm import trange, tqdm
@@ -17,6 +14,8 @@ from botocore import UNSIGNED
 from botocore.config import Config
 import rasterio
 
+from datasets.utils import LevelFunc, ChildFunc, IntersectionFunc, output_by_level, \
+    get_process_memory_use
 
 # Land cover classification mapping
 LAND_COVER_CLASSES = {
@@ -38,32 +37,8 @@ LAND_COVER_CLASSES = {
 LAND_COVER_CLASSES_BINS = list(LAND_COVER_CLASSES.keys())
 LAND_COVER_CLASSES_BINS.append(101)
 land_cover_names = list(LAND_COVER_CLASSES.values())
-geod = Geod(ellps="WGS84")
 max_memory_usage = 0
 s3_bucket = "esa-worldcover"
-
-type LevelFunc = Callable[[DataFrame, int], Series]
-type ChildFunc = Callable[[DataFrame, any], Series]
-type IntersectionFunc = Callable[[box, DataFrame, int], DataFrame]
-
-
-def get_process_memory_use():
-    proc = psutil.Process(os.getpid())
-    mem_info = proc.memory_info()
-    return mem_info.rss
-
-
-def output_by_level(max_level: int, stats_df: DataFrame, level_fn: LevelFunc, file_path: Path) -> list[Path]:
-    output_file_names = []
-
-    for i in trange(max_level, desc=f"Saving to {str(file_path.parent)}"):
-        level = stats_df[level_fn(stats_df, i)]
-        suffix = file_path.suffix
-        file_name = file_path.with_suffix(f".level{i:02}{suffix}")
-        output_file_names.append(file_name)
-        level.to_file(file_name)
-
-    return output_file_names
 
 
 def calculate_total_area(statistics: DataFrame):
@@ -131,19 +106,6 @@ def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> 
 
     return intersections
 
-
-def create_directories() -> tuple[Path, Path]:
-    """
-    Creates necessary paths for output and caching.
-    """
-
-    if not Path("output").exists():
-        Path("output").mkdir()
-
-    if not Path(".cache").exists():
-        Path(".cache").mkdir()
-
-    return Path("output").resolve(), Path(".cache").resolve()
 
 
 def get_tile_keys(geom_df: DataFrame, level: int, level_fn: LevelFunc) -> list[str]:

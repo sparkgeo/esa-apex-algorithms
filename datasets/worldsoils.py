@@ -1,44 +1,25 @@
 # https://gui.world-soils.com/mapserver/Europe?SERVICE=WCS&VERSION=2.0.1&REQUEST=GetCoverage&COVERAGEID=soc_0-5cm_mean_europe_2020-2022&FORMAT=image/tiff&OUTPUTCRS=http://www.opengis.net/def/crs/EPSG/0/4326&SUBSET=long(8,10)&SUBSET=lat(50,52)&SUBSETTINGCRS=http://www.opengis.net/def/crs/EPSG/0/4326
-import os
-from collections.abc import Callable
 import math
 from pathlib import Path
 
+import numpy as np
 import humanize
-import psutil
 import rasterio
 import requests
-from pandas import DataFrame, Series
+import urllib3
+from pandas import DataFrame
+from rasterio import features, DatasetReader
+from rasterio.errors import WindowError
 from shapely import box
-from tqdm import trange
+from tqdm import trange, tqdm
 
-type LevelFunc = Callable[[DataFrame, int], Series]
-type ChildFunc = Callable[[DataFrame, any], Series]
-type IntersectionFunc = Callable[[box, DataFrame, int], DataFrame]
+from datasets.utils import LevelFunc, ChildFunc, IntersectionFunc, output_by_level, \
+    get_process_memory_use
 
-
-def get_process_memory_use():
-    proc = psutil.Process(os.getpid())
-    mem_info = proc.memory_info()
-    return mem_info.rss
-
-
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 base_url = "https://gui.world-soils.com/mapserver/Europe"
 coverage_id = "soc_0-5cm_mean_europe_2018-2020"
 max_memory_usage = 0
-
-
-def output_by_level(max_level: int, stats_df: DataFrame, level_fn: LevelFunc, file_path: Path) -> list[Path]:
-    output_file_names = []
-
-    for i in trange(max_level, desc=f"Saving to {str(file_path.parent)}"):
-        level = stats_df[level_fn(stats_df, i)]
-        suffix = file_path.suffix
-        file_name = file_path.with_suffix(f".level{i:02}{suffix}")
-        output_file_names.append(file_name)
-        level.to_file(file_name)
-
-    return output_file_names
 
 
 def round_down(val, base):
@@ -95,8 +76,79 @@ def get_tile_keys(geom_df: DataFrame, level: int, level_fn: LevelFunc) -> list[t
     return list(zip(cells, params))
 
 
-def nuts_level_func(stats_df: DataFrame, level: int) -> Series:
-    return Series(stats_df["LEVL_CODE"] == level)
+def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> DataFrame:
+    global max_memory_usage
+
+    ds_bbox = box(*source_raster.bounds)
+    src_file_name = Path(source_raster.name)
+
+    geometry_progress_bar = trange(len(intersections), leave=False)
+
+    for i in geometry_progress_bar:
+        region = intersections.iloc[i]
+        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+        current_memory_usage = get_process_memory_use()
+        geometry_progress_bar.set_postfix_str(f"{humanize.naturalsize(current_memory_usage)}")
+        geometry_progress_bar.set_description_str(f"{src_file_name.name}")
+        geom = region.geometry
+
+        try:
+            window = features.geometry_window(source_raster, [geom])
+        except WindowError as e:
+            continue
+
+        window_xform = source_raster.window_transform(window)
+        data = source_raster.read(window=window, masked=True)
+        data.mask |= (data.data == 32767)
+        clipped_geom = geom.intersection(ds_bbox)
+        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+
+        if clipped_geom.is_empty:
+            continue
+
+        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+        mask = features.geometry_mask(
+            [clipped_geom], [window.height, window.width], window_xform, invert=True
+        )
+        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+
+        masked_data = np.ma.array(data[0], mask=mask)
+
+        if not masked_data.mask.all():
+            np_sum = np.ma.sum(masked_data)
+            intersections.loc[region.name, "soil_min"] = min(intersections.loc[region.name, "soil_min"], np.min(masked_data))
+            intersections.loc[region.name, "soil_max"] = max(intersections.loc[region.name, "soil_max"], np.max(masked_data))
+            intersections.loc[region.name, "value_sum"] += np_sum
+            intersections.loc[region.name, "sample_count"] += (~masked_data.mask).sum()
+
+        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+
+    return intersections
+
+
+def calculate_mean(df: DataFrame):
+    df["soil_mean"] = np.where(
+        df["sample_count"] == 0, 0.0, df["value_sum"] / df["sample_count"]
+    )
+
+
+def sum_children(stats_df: DataFrame, bottom_level: int, level_fn: LevelFunc, child_fn: ChildFunc, code_column_name: str) -> None:
+    level_progress_bar = trange(bottom_level - 1, 0, -1, desc="Calculating parent statistics")
+
+    for level in level_progress_bar:
+        df = stats_df[level_fn(stats_df, level - 1)]
+
+        for index, nut in tqdm(df.iterrows(), total=df.shape[0], leave=False):
+            code = nut[code_column_name]
+            children = stats_df[child_fn(stats_df, code)]
+
+            if children.empty:
+                continue
+
+            stats_df.loc[index, "soil_min"] = children["soil_min"].min()
+            stats_df.loc[index, "soil_max"] = children["soil_max"].max()
+            stats_df.loc[index, "value_sum"] = children["value_sum"].sum()
+            stats_df.loc[index, "sample_count"] = children["sample_count"].sum()
 
 
 def process(wcs_params: list[tuple],
@@ -109,16 +161,17 @@ def process(wcs_params: list[tuple],
             output_path: Path
             ) -> list[Path]:
 
-    stats_df["mean"] = 0.0
-    stats_df["min"] = 0.0
-    stats_df["max"] = 0.0
-    stats_df["sd"] = 0.0
+    stats_df["soil_min"] = float("inf")
+    stats_df["soil_max"] = -float("inf")
+    stats_df["value_sum"] = 0.0
+    stats_df["sample_count"] = 0
 
     print("Processing")
     tiff_progress_bar = trange(len(wcs_params))
     for idx in tiff_progress_bar:
         tiff_progress_bar.set_postfix_str(f"{humanize.naturalsize(max_memory_usage)}")
         src_file_name = Path("./.cache") / f"{coverage_id}_{wcs_params[idx][0][0]}_{wcs_params[idx][0][1]}_{wcs_params[idx][0][2]}_{wcs_params[idx][0][3]}.tif"
+        tiff_progress_bar.set_description_str(f"{src_file_name.name}")
 
         if not src_file_name.exists():
             response = requests.get(base_url, params=wcs_params[idx][1], verify=False, stream=True)
@@ -138,14 +191,15 @@ def process(wcs_params: list[tuple],
             ds.close()
             continue
 
-        # results = calculate_values(ds, intersections)
-
-        # stats_df.loc[results.index] = results
+        results = calculate_values(ds, intersections)
+        stats_df.loc[results.index] = results
 
         ds.close()
 
-    # sum_children(stats_df, bottom_level, level_fn, child_fn, code_column_name)
-    # calculate_total_area(stats_df)
+    sum_children(stats_df, bottom_level, level_fn, child_fn, code_column_name)
+    calculate_mean(stats_df)
+
+    stats_df.drop(columns=["value_sum", "sample_count"], axis=1, inplace=True)
 
     file_names = output_by_level(bottom_level, stats_df, level_fn, output_path)
     print("Done")

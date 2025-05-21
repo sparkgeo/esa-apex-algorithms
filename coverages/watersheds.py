@@ -4,8 +4,8 @@ import geopandas as gpd
 from pandas import DataFrame, Series
 from shapely import box
 
+from datasets.utils import create_directories
 from datasets.worldcover import (
-    create_directories,
     get_tile_keys,
     process,
     land_cover_names,

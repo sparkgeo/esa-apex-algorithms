@@ -4,7 +4,9 @@ import geopandas as gpd
 from pandas import DataFrame, Series
 from shapely import box
 
-from datasets.worldcover import land_cover_names, create_directories
+from datasets.utils import create_directories
+from datasets.worldcover import land_cover_names
+from datasets.worldsoils import coverage_id
 from inject_metadata import inject_metadata
 
 
@@ -88,7 +90,7 @@ def main_worldsoils():
         nuts_children,
         nuts_intersections,
         "NUTS_ID",
-        Path("output/worldsoils-stats-nuts.fgb")
+        Path(f"output/{coverage_id}-nuts.fgb")
     )
 
     for file_name in file_names:
