@@ -4,21 +4,8 @@ import geopandas as gpd
 from pandas import DataFrame, Series
 from shapely import box
 
-from datasets.worldcover import (
-    create_directories,
-    get_tile_keys,
-    process,
-    land_cover_names
-)
+from datasets.worldcover import land_cover_names, create_directories
 from inject_metadata import inject_metadata
-
-nuts_worldcover_metadata = {
-    "identifierKey": "NUTS_ID",
-    "nameKey": "NUTS_NAME",
-    "levelKey": "LEVL_CODE",
-    "childrenKey": "children",
-    "attributeKeys": land_cover_names
-}
 
 
 def nuts_level_func(stats_df: DataFrame, level: int) -> Series:
@@ -44,7 +31,20 @@ def nuts_intersections(ds_bbox: box, stats_df: DataFrame, level: int):
         ]
 
 
-def main():
+def main_worldcover():
+    from datasets.worldcover import (
+        get_tile_keys,
+        process,
+    )
+
+    nuts_worldcover_metadata = {
+        "identifierKey": "NUTS_ID",
+        "nameKey": "NUTS_NAME",
+        "levelKey": "LEVL_CODE",
+        "childrenKey": "children",
+        "attributeKeys": land_cover_names,
+    }
+
     create_directories()
     geom_df = gpd.read_file("input/NUTS_with_children.fgb", engine="pyogrio")
     keys = get_tile_keys(geom_df, 0, nuts_level_func)
@@ -63,5 +63,37 @@ def main():
         inject_metadata(file_name, nuts_worldcover_metadata)
 
 
+def main_worldsoils():
+    from datasets.worldsoils import (
+        get_tile_keys,
+        process,
+    )
+
+    nuts_worldsoils_metadata = {
+        "identifierKey": "NUTS_ID",
+        "nameKey": "NUTS_NAME",
+        "levelKey": "LEVL_CODE",
+        "childrenKey": "children",
+        "attributeKeys": ["soil_min", "soil_max", "soil_mean"],
+    }
+
+    create_directories()
+    geom_df = gpd.read_file("input/NUTS_with_children.fgb", engine="pyogrio")
+    keys = get_tile_keys(geom_df, 0, nuts_level_func)
+    file_names = process(
+        keys,
+        geom_df,
+        4,
+        nuts_level_func,
+        nuts_children,
+        nuts_intersections,
+        "NUTS_ID",
+        Path("output/worldsoils-stats-nuts.fgb")
+    )
+
+    for file_name in file_names:
+        inject_metadata(file_name, nuts_worldsoils_metadata)
+
+
 if __name__ == "__main__":
-    main()
+    main_worldsoils()
