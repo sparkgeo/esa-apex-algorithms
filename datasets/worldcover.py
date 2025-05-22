@@ -1,8 +1,11 @@
+"""
+Calculates the coverage of each land cover class in a polygon in square km. Also adds a total area
+so that proportions can be calculated.
+"""
 from pathlib import Path
 
 import geopandas as gpd
 from pandas import DataFrame
-from pyproj import Geod
 from rasterio.errors import WindowError
 from tqdm import trange, tqdm
 from rasterio import features, DatasetReader
@@ -14,8 +17,16 @@ from botocore import UNSIGNED
 from botocore.config import Config
 import rasterio
 
-from datasets.utils import LevelFunc, ChildFunc, IntersectionFunc, output_by_level, \
-    get_process_memory_use
+from datasets.utils import (
+    LevelFunc,
+    ChildFunc,
+    IntersectionFunc,
+    output_by_level,
+    get_process_memory_use,
+    geod,
+    checkpoint_memory_usage,
+    max_memory_usage,
+)
 
 # Land cover classification mapping
 LAND_COVER_CLASSES = {
@@ -37,26 +48,37 @@ LAND_COVER_CLASSES = {
 LAND_COVER_CLASSES_BINS = list(LAND_COVER_CLASSES.keys())
 LAND_COVER_CLASSES_BINS.append(101)
 land_cover_names = list(LAND_COVER_CLASSES.values())
-max_memory_usage = 0
 s3_bucket = "esa-worldcover"
 
 
-def calculate_total_area(statistics: DataFrame):
+def attribute_keys() -> list[str]:
+    """
+    Returns the names of the columns that we want to render in the front end.
+    """
+    return land_cover_names + ["Unknown"]
+
+
+def calculate_total_area(df: DataFrame) -> None:
+    """
+    Calculates the total area of each polygon in square km and adds it to the dataframe.
+    """
     areas = []
     unknowns = []
 
-    for _, row in tqdm(statistics.iterrows(), total=statistics.shape[0], desc="Calculating total area"):
+    for _, row in tqdm(df.iterrows(), total=df.shape[0], desc="Calculating total area"):
         total_area = abs(geod.geometry_area_perimeter(row.geometry)[0]) / 1000000.0
         covered_area = row[land_cover_names].sum()
         areas.append(total_area)
         unknowns.append(max(0.0, total_area - covered_area))
 
-    statistics["total_area"] = areas
-    statistics["Unknown"] = unknowns
+    df["total_area"] = areas
+    df["Unknown"] = unknowns
 
 
 def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> DataFrame:
-    global max_memory_usage
+    """
+    Calculates the values for each land cover class that partially or wholly intersects the given polygon.
+    """
 
     ds_bbox = box(*source_raster.bounds)
     src_file_name = Path(source_raster.name)
@@ -64,10 +86,10 @@ def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> 
     geometry_progress_bar = trange(
         len(intersections), leave=False, desc=src_file_name.name
     )
-    # TODO: Parallelize
+
     for i in geometry_progress_bar:
         region = intersections.iloc[i]
-        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+        checkpoint_memory_usage()
         current_memory_usage = get_process_memory_use()
         geometry_progress_bar.set_postfix_str(f"{humanize.naturalsize(current_memory_usage)}")
         geometry_progress_bar.set_description_str(f"{src_file_name.name}")
@@ -75,13 +97,13 @@ def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> 
 
         try:
             window = features.geometry_window(source_raster, [geom])
-        except WindowError as e:
+        except WindowError:
             continue
 
         window_xform = source_raster.window_transform(window)
         data = source_raster.read(window=window)
         clipped_geom = geom.intersection(ds_bbox)
-        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+        checkpoint_memory_usage()
 
         if clipped_geom.is_empty:
             continue
@@ -89,11 +111,11 @@ def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> 
         clipped_geom_area = (
                 abs(geod.geometry_area_perimeter(clipped_geom)[0]) / 1000000.0
         )
-        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+        checkpoint_memory_usage()
         mask = features.geometry_mask(
             [clipped_geom], [window.height, window.width], window_xform, invert=True
         )
-        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+        checkpoint_memory_usage()
         values = np.histogram(data[0][mask], bins=LAND_COVER_CLASSES_BINS)[0]
         np_sum = np.sum(values)
 
@@ -102,14 +124,18 @@ def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> 
             values = values * (clipped_geom_area / np_sum)
             intersections.loc[region.name, land_cover_names] += values
 
-        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+        checkpoint_memory_usage()
 
     return intersections
 
 
 
-def get_tile_keys(geom_df: DataFrame, level: int, level_fn: LevelFunc) -> list[str]:
-    countries = geom_df[level_fn(geom_df, level)]
+def get_tile_keys(df: DataFrame, level: int, level_fn: LevelFunc) -> list[str]:
+    """
+    Returns a list of raster tiles as S3 keys for the given level of polygon data.
+    """
+
+    countries = df[level_fn(df, level)]
     tile_index_df = gpd.read_file("input/esa_worldcover_grid.fgb", engine="pyogrio")
     intersected_tiles = gpd.sjoin(tile_index_df, countries, how="inner")
     unique_tiles = intersected_tiles.drop_duplicates(subset="ll_tile").copy()
@@ -126,22 +152,27 @@ def get_tile_keys(geom_df: DataFrame, level: int, level_fn: LevelFunc) -> list[s
     return tile_keys
 
 
-def sum_children(stats_df: DataFrame, bottom_level: int, level_fn: LevelFunc, child_fn: ChildFunc, code_column_name: str) -> None:
+def sum_children(df: DataFrame, bottom_level: int, level_fn: LevelFunc, child_fn: ChildFunc, code_column_name: str) -> None:
+    """
+    Iterates over each polygon from the bottom up, summing the values in the children polygons.
+    """
+
     level_progress_bar = trange(bottom_level - 1, 0, -1, desc="Calculating parent statistics")
+
     for level in level_progress_bar:
-        df = stats_df[level_fn(stats_df, level - 1)]
+        df = df[level_fn(df, level - 1)]
         for index, nut in tqdm(df.iterrows(), total=df.shape[0], leave=False):
             code = nut[code_column_name]
-            children = stats_df[child_fn(stats_df, code)]
+            children = df[child_fn(df, code)]
 
             if children.empty:
                 continue
 
-            stats_df.loc[index, land_cover_names] = children[land_cover_names].sum()
+            df.loc[index, land_cover_names] = children[land_cover_names].sum()
 
 
 def process(tif_file_names: list[str],
-            stats_df: DataFrame,
+            df: DataFrame,
             bottom_level: int,
             level_fn: LevelFunc,
             child_fn: ChildFunc,
@@ -149,11 +180,15 @@ def process(tif_file_names: list[str],
             code_column_name: str,
             output_path: Path
             ) -> list[Path]:
-    for name in land_cover_names:
-        stats_df[name] = 0.0
+    """
+    For each raster tile, calculate the values for each land cover class that partially or wholly intersects the given polygon.
+    """
 
-    stats_df["Unknown"] = 0.0
-    stats_df["total_area"] = 0.0
+    for name in land_cover_names:
+        df[name] = 0.0
+
+    df["Unknown"] = 0.0
+    df["total_area"] = 0.0
 
     s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
 
@@ -169,7 +204,7 @@ def process(tif_file_names: list[str],
         ds = rasterio.open(src_file_name)
         ds_bbox = box(*ds.bounds)
 
-        intersections = intersection_fn(ds_bbox, stats_df, bottom_level)
+        intersections = intersection_fn(ds_bbox, df, bottom_level)
 
         if len(intersections) == 0:
             ds.close()
@@ -177,14 +212,14 @@ def process(tif_file_names: list[str],
 
         results = calculate_values(ds, intersections)
 
-        stats_df.loc[results.index] = results
+        df.loc[results.index] = results
 
         ds.close()
 
-    sum_children(stats_df, bottom_level, level_fn, child_fn, code_column_name)
-    calculate_total_area(stats_df)
+    sum_children(df, bottom_level, level_fn, child_fn, code_column_name)
+    calculate_total_area(df)
 
-    file_names = output_by_level(bottom_level, stats_df, level_fn, output_path)
+    file_names = output_by_level(bottom_level, df, level_fn, output_path)
     print("Done")
 
     return file_names

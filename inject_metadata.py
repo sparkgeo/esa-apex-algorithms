@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from osgeo import ogr
-from pydantic import BaseModel, ValidationError, field_serializer
+from pydantic import BaseModel, field_serializer
 
 
 class MissingColumn(Exception):
@@ -30,12 +30,7 @@ class MetadataOut(BaseModel):
         return ",".join([str(v) for v in keys])
 
 
-def inject_metadata(fgb_file_path: Path, metadata: dict):
-    try:
-        metadata = MetadataIn.model_validate(metadata)
-    except ValidationError:
-        raise
-
+def inject_metadata(fgb_file_path: Path, metadata: MetadataIn):
     if not fgb_file_path.exists():
         raise FileNotFoundError(f"Input file '{fgb_file_path}' not found")
     if fgb_file_path.suffix != ".fgb":

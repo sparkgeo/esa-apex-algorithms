@@ -7,30 +7,71 @@ import humanize
 import rasterio
 import requests
 import urllib3
+from geopandas import GeoDataFrame
 from pandas import DataFrame
 from rasterio import features, DatasetReader
 from rasterio.errors import WindowError
 from shapely import box
 from tqdm import trange, tqdm
 
-from datasets.utils import LevelFunc, ChildFunc, IntersectionFunc, output_by_level, \
-    get_process_memory_use
+from datasets.utils import (
+    LevelFunc,
+    ChildFunc,
+    IntersectionFunc,
+    output_by_level,
+    get_process_memory_use,
+    checkpoint_memory_usage,
+    max_memory_usage
+)
 
+# On 2025/05/21, world-soils's certificate was invalid.
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 base_url = "https://gui.world-soils.com/mapserver/Europe"
-coverage_id = "soc_0-5cm_mean_europe_2018-2020"
-max_memory_usage = 0
+coverage_id = "soc_0-5cm_mean_europe_2020-2022"
 
 
-def round_down(val, base):
+def round_down(val, base) -> float:
+    """
+    Rounds down a given value to the nearest multiple of a specified base.
+
+    :param val:
+        The value to be rounded down.
+    :param base:
+        The base to round down to.
+    :return:
+        The result of rounding down the value to the nearest multiple of
+        the base.
+    """
+
     return math.floor(val / base) * base
 
 
-def round_up(val, base):
+def round_up(val, base) -> float:
+    """
+    Rounds up a given value to the nearest multiple of a specified base.
+
+    :param val:
+        The value to be rounded down.
+    :param base:
+        The base to round down to.
+    :return:
+        The result of rounding down the value to the nearest multiple of
+        the base.
+    """
+
     return math.ceil(val / base) * base
 
 
-def get_2deg_cells(gdf):
+def get_2deg_cells(gdf: GeoDataFrame) -> list[tuple]:
+    """
+    Extracts unique 2x2 degree cells from the geometric boundaries of a GeoDataFrame.
+
+    :param gdf:
+        A GeoDataFrame containing geometric data to be analyzed.
+    :return:
+        A list of tuples representing the unique 2x2 degree cells. Each tuple
+        is structured as (min_lon, min_lat, max_lon, max_lat).
+    """
     cells = set()
 
     for geom in gdf.geometry:
@@ -54,10 +95,22 @@ def get_2deg_cells(gdf):
     return list(cells)
 
 
-def get_tile_keys(geom_df: DataFrame, level: int, level_fn: LevelFunc) -> list[tuple]:
-    countries = geom_df[level_fn(geom_df, level)]
+def attribute_keys() -> list[str]:
+    """
+    Returns the names of the columns that we want to render in the front end.
+    """
 
-    cells = get_2deg_cells(countries)
+    return ["soil_min", "soil_max", "soil_mean"]
+
+
+def get_tile_keys(df: DataFrame, level: int, level_fn: LevelFunc) -> list[tuple]:
+    """
+    Returns a list of raster tiles as WCS query parameters for the given level of polygon data.
+    """
+
+    polygons = df[level_fn(df, level)]
+
+    cells = get_2deg_cells(polygons)
     params = []
 
     for cell in cells:
@@ -77,7 +130,9 @@ def get_tile_keys(geom_df: DataFrame, level: int, level_fn: LevelFunc) -> list[t
 
 
 def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> DataFrame:
-    global max_memory_usage
+    """
+    Calculates the values for each land cover class that partially or wholly intersects the given polygon.
+    """
 
     ds_bbox = box(*source_raster.bounds)
     src_file_name = Path(source_raster.name)
@@ -86,7 +141,7 @@ def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> 
 
     for i in geometry_progress_bar:
         region = intersections.iloc[i]
-        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+        checkpoint_memory_usage()
         current_memory_usage = get_process_memory_use()
         geometry_progress_bar.set_postfix_str(f"{humanize.naturalsize(current_memory_usage)}")
         geometry_progress_bar.set_description_str(f"{src_file_name.name}")
@@ -94,23 +149,23 @@ def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> 
 
         try:
             window = features.geometry_window(source_raster, [geom])
-        except WindowError as e:
+        except WindowError:
             continue
 
         window_xform = source_raster.window_transform(window)
         data = source_raster.read(window=window, masked=True)
         data.mask |= (data.data == 32767)
         clipped_geom = geom.intersection(ds_bbox)
-        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+        checkpoint_memory_usage()
 
         if clipped_geom.is_empty:
             continue
 
-        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+        checkpoint_memory_usage()
         mask = features.geometry_mask(
             [clipped_geom], [window.height, window.width], window_xform, invert=True
         )
-        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+        checkpoint_memory_usage()
 
         masked_data = np.ma.array(data[0], mask=mask)
 
@@ -121,18 +176,24 @@ def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> 
             intersections.loc[region.name, "value_sum"] += np_sum
             intersections.loc[region.name, "sample_count"] += (~masked_data.mask).sum()
 
-        max_memory_usage = max(max_memory_usage, get_process_memory_use())
+        checkpoint_memory_usage()
 
     return intersections
 
 
-def calculate_mean(df: DataFrame):
+def calculate_mean(df: DataFrame) -> None:
     df["soil_mean"] = np.where(
         df["sample_count"] == 0, 0.0, df["value_sum"] / df["sample_count"]
     )
+    df["soil_min"] = df["soil_min"].replace(np.inf, 0.0)
+    df["soil_max"] = df["soil_max"].replace(-np.inf, 0.0)
 
 
 def sum_children(stats_df: DataFrame, bottom_level: int, level_fn: LevelFunc, child_fn: ChildFunc, code_column_name: str) -> None:
+    """
+    Iterates over each polygon from the bottom up, summing the values in the children polygons.
+    """
+
     level_progress_bar = trange(bottom_level - 1, 0, -1, desc="Calculating parent statistics")
 
     for level in level_progress_bar:
@@ -160,6 +221,9 @@ def process(wcs_params: list[tuple],
             code_column_name: str,
             output_path: Path
             ) -> list[Path]:
+    """
+    For each raster tile, calculate the soil organic carbon that partially or wholly intersects the given polygon.
+    """
 
     stats_df["soil_min"] = float("inf")
     stats_df["soil_max"] = -float("inf")
