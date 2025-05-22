@@ -1,4 +1,3 @@
-# https://gui.world-soils.com/mapserver/Europe?SERVICE=WCS&VERSION=2.0.1&REQUEST=GetCoverage&COVERAGEID=soc_0-5cm_mean_europe_2020-2022&FORMAT=image/tiff&OUTPUTCRS=http://www.opengis.net/def/crs/EPSG/0/4326&SUBSET=long(8,10)&SUBSET=lat(50,52)&SUBSETTINGCRS=http://www.opengis.net/def/crs/EPSG/0/4326
 import math
 from pathlib import Path
 
