@@ -3,6 +3,7 @@ Calculates the coverage of each land cover class in a polygon in square km. Also
 so that proportions can be calculated.
 """
 from pathlib import Path
+from joblib import Parallel, delayed
 
 import geopandas as gpd
 from pandas import DataFrame
@@ -58,20 +59,30 @@ def attribute_keys() -> list[str]:
     return land_cover_names + ["Unknown"]
 
 
+def _compute_area(row):
+    total_area = abs(geod.geometry_area_perimeter(row.geometry)[0]) / 1000000.0
+    covered_area = row[land_cover_names].sum()
+    unknown = max(0.0, total_area - covered_area)
+
+    return total_area, unknown
+
+
 def calculate_total_area(df: DataFrame) -> None:
     """
     Calculates the total area of each polygon in square km and adds it to the dataframe.
     """
-    areas = []
-    unknowns = []
 
-    for _, row in tqdm(df.iterrows(), total=df.shape[0], desc="Calculating total area"):
-        total_area = abs(geod.geometry_area_perimeter(row.geometry)[0]) / 1000000.0
-        covered_area = row[land_cover_names].sum()
-        areas.append(total_area)
-        unknowns.append(max(0.0, total_area - covered_area))
+    results = Parallel(n_jobs=-1)(
+        delayed(_compute_area)(row)
+        for _, row in tqdm(
+            df.iterrows(), total=df.shape[0], desc="Calculating total area"
+        )
+    )
 
-    df["total_area"] = areas
+    # Unzip results
+    total_areas, unknowns = zip(*results)
+
+    df["total_area"] = total_areas
     df["Unknown"] = unknowns
 
 

@@ -24,6 +24,10 @@ def output_by_level(max_level: int, df: DataFrame, level_fn: LevelFunc, file_pat
 
     for i in trange(max_level, desc=f"Saving to {str(file_path.parent)}"):
         level = df[level_fn(df, i)]
+
+        if not level.has_sindex:
+            _ = level.sindex
+            
         suffix = file_path.suffix
         file_name = file_path.with_suffix(f".level{i:02}{suffix}")
         output_file_names.append(file_name)
