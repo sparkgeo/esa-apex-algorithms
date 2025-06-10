@@ -188,7 +188,7 @@ def calculate_mean(df: DataFrame) -> None:
     df["soil_max"] = df["soil_max"].replace(-np.inf, 0.0)
 
 
-def sum_children(stats_df: DataFrame, bottom_level: int, level_fn: LevelFunc, child_fn: ChildFunc, code_column_name: str) -> None:
+def sum_children(df: DataFrame, bottom_level: int, level_fn: LevelFunc, child_fn: ChildFunc, code_column_name: str) -> None:
     """
     Iterates over each polygon from the bottom up, summing the values in the children polygons.
     """
@@ -196,19 +196,19 @@ def sum_children(stats_df: DataFrame, bottom_level: int, level_fn: LevelFunc, ch
     level_progress_bar = trange(bottom_level - 1, 0, -1, desc="Calculating parent statistics")
 
     for level in level_progress_bar:
-        df = stats_df[level_fn(stats_df, level - 1)]
+        level_df = df[level_fn(df, level - 1)]
 
-        for index, nut in tqdm(df.iterrows(), total=df.shape[0], leave=False):
+        for index, nut in tqdm(level_df.iterrows(), total=level_df.shape[0], leave=False):
             code = nut[code_column_name]
-            children = stats_df[child_fn(stats_df, code)]
+            children = df[child_fn(df, code)]
 
             if children.empty:
                 continue
 
-            stats_df.loc[index, "soil_min"] = children["soil_min"].min()
-            stats_df.loc[index, "soil_max"] = children["soil_max"].max()
-            stats_df.loc[index, "value_sum"] = children["value_sum"].sum()
-            stats_df.loc[index, "sample_count"] = children["sample_count"].sum()
+            df.loc[index, "soil_min"] = children["soil_min"].min()
+            df.loc[index, "soil_max"] = children["soil_max"].max()
+            df.loc[index, "value_sum"] = children["value_sum"].sum()
+            df.loc[index, "sample_count"] = children["sample_count"].sum()
 
 
 def process(wcs_params: list[tuple],

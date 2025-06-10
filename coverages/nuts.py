@@ -85,6 +85,36 @@ def nuts_intersections(bbox: box, df: DataFrame, level: int) -> DataFrame:
 
 metadata = MetadataIn(identifierKey="NUTS_ID", nameKey="NUTS_NAME", levelKey="LEVL_CODE", childrenKey="children", attributeKeys=[])
 
+
+def process_esa_habitat():
+    """
+    Processes geospatial data using the EAS Habitats dataset utilities to compute
+    and inject metadata statistics for specified NUTS regions and their related
+    hierarchies. This function performs multiple tasks including reading input
+    data, processing geospatial keys, and saving outputs while appending metadata.
+    """
+    from datasets.esa_habitat import get_tile_keys, process, attribute_keys
+
+    metadata.attributeKeys = attribute_keys()
+
+    create_directories()
+    geom_df = gpd.read_file("input/NUTS_with_children.fgb", engine="pyogrio")
+    keys = get_tile_keys(geom_df, 0, nuts_level_func)
+    file_names = process(
+        keys,
+        geom_df,
+        4,
+        nuts_level_func,
+        nuts_children,
+        nuts_intersections,
+        "NUTS_ID",
+        Path("output/esa-habitat-stats-nuts.fgb")
+    )
+
+    for file_name in file_names:
+        inject_metadata(file_name, metadata)
+
+
 def process_worldcover():
     """
     Processes geospatial data using the WorldCover dataset utilities to compute
@@ -146,4 +176,4 @@ def process_worldsoils():
 
 
 if __name__ == "__main__":
-    process_worldsoils()
+    process_esa_habitat()

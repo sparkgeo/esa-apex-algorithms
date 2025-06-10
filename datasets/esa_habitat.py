@@ -3,19 +3,17 @@ Calculates the coverage of each land cover class in a polygon in square km. Also
 so that proportions can be calculated.
 """
 from pathlib import Path
+
 from joblib import Parallel, delayed
 
-import geopandas as gpd
 from pandas import DataFrame
+import requests
 from rasterio.errors import WindowError
 from tqdm import trange, tqdm
 from rasterio import features, DatasetReader
 import numpy as np
 from shapely import box
-import boto3
 import humanize
-from botocore import UNSIGNED
-from botocore.config import Config
 import rasterio
 
 from datasets.utils import (
@@ -24,44 +22,41 @@ from datasets.utils import (
     IntersectionFunc,
     output_by_level,
     get_process_memory_use,
-    geod,
     checkpoint_memory_usage,
     max_memory_usage,
 )
 
-# Land cover classification mapping
-LAND_COVER_CLASSES = {
-    10: "Tree cover",
-    20: "Shrubland",
-    30: "Grassland",
-    40: "Cropland",
-    50: "Built-up",
-    60: "Bare / sparse vegetation",
-    70: "Snow and ice",
-    80: "Permanent water bodies",
-    90: "Herbaceous wetland",
-    95: "Mangroves",
-    100: "Moss and lichen",
+HABITAT_CLASSES = {
+    20000: "Costal Habitats",
+    30000: "Inland Surface Waters",
+    40000: "Mires, bogs and fens",
+    50000: "Grasslands and lands dominated by forbs, mosses or lichens",
+    60000: "Heathland, scrub and tundra",
+    70000: "Woodland, forest and other wooded land",
+    80000: "Inland unvegetated or sparsely vegetated habitats",
+    90000: "Regularly or recently cultivated agricultural, horticultural and domestic habitats",
+    100000: "Constructed, industrial and other artificial habitats",
+    110000: "Complex Habitats",
 }
 
 # Numpy's histogram bins are half-open except the last bin, so we need to add a right edge to the last bin.
-# This can be anything > 100, but 101 seems safe enough if new categories get added to the end but we haven't updated the code.
-LAND_COVER_CLASSES_BINS = list(LAND_COVER_CLASSES.keys())
-LAND_COVER_CLASSES_BINS.append(101)
-land_cover_names = list(LAND_COVER_CLASSES.values())
-s3_bucket = "esa-worldcover"
+# This can be anything > 110000, but 110001 seems safe enough if new categories get added to the end but we haven't updated the code.
+HABITAT_CLASSES_BINS = list(HABITAT_CLASSES.keys())
+HABITAT_CLASSES_BINS.append(110001)
+habitat_names = list(HABITAT_CLASSES.values())
+server_url = "https://eoresults.esa.int"
 
 
 def attribute_keys() -> list[str]:
     """
     Returns the names of the columns that we want to render in the front end.
     """
-    return land_cover_names + ["Unknown"]
+    return habitat_names + ["Unknown"]
 
 
 def _compute_area(row):
-    total_area = abs(geod.geometry_area_perimeter(row.geometry)[0]) / 1000000.0
-    covered_area = row[land_cover_names].sum()
+    total_area = row.geometry.area / 1000000.0
+    covered_area = row[habitat_names].sum()
     unknown = max(0.0, total_area - covered_area)
 
     return total_area, unknown
@@ -119,21 +114,18 @@ def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> 
         if clipped_geom.is_empty:
             continue
 
-        clipped_geom_area = (
-                abs(geod.geometry_area_perimeter(clipped_geom)[0]) / 1000000.0
-        )
         checkpoint_memory_usage()
         mask = features.geometry_mask(
             [clipped_geom], [window.height, window.width], window_xform, invert=True
         )
         checkpoint_memory_usage()
-        values = np.histogram(data[0][mask], bins=LAND_COVER_CLASSES_BINS)[0]
+        values = np.histogram(data[0][mask], bins=HABITAT_CLASSES_BINS)[0]
         np_sum = np.sum(values)
 
         # Avoid divide by zero errors.
         if not np.isclose(0.0, np_sum, atol=1e-6):
-            values = values * (clipped_geom_area / np_sum)
-            intersections.loc[region.name, land_cover_names] += values
+            values = values * ((clipped_geom.area / 1000000.0) / np_sum)
+            intersections.loc[region.name, habitat_names] += values
 
         checkpoint_memory_usage()
 
@@ -143,22 +135,9 @@ def calculate_values(source_raster: DatasetReader, intersections: DataFrame) -> 
 
 def get_tile_keys(df: DataFrame, level: int, level_fn: LevelFunc) -> list[str]:
     """
-    Returns a list of raster tiles as S3 keys for the given level of polygon data.
+    Returns a list of raster tiles.
     """
-
-    countries = df[level_fn(df, level)]
-    tile_index_df = gpd.read_file("input/esa_worldcover_grid.fgb", engine="pyogrio")
-    intersected_tiles = gpd.sjoin(tile_index_df, countries, how="inner")
-    unique_tiles = intersected_tiles.drop_duplicates(subset="ll_tile").copy()
-
-    tile_names = unique_tiles["ll_tile"].tolist()
-    tile_keys = [f"v200/2021/map/ESA_WorldCover_10m_2021_v200_{tile_name.strip()}_Map.tif" for tile_name in tile_names]
-
-    unique_tiles["tile_key"] = tile_keys
-
-    unique_tiles = unique_tiles[["ll_tile", "tile_key", "geometry"]]
-
-    unique_tiles.to_file("output/worldcover-tiles.fgb")
+    tile_keys = [server_url + "/d/ESA_PEOPLE_EA_HABITAT_MAPS_EUNIS_2021/2020/01/01/ESA_PEOPLE_EA_HABITAT_MAPS_EUNIS_2021-GR_2020/GR_L1_pp_2020.tif"]
 
     return tile_keys
 
@@ -179,7 +158,7 @@ def sum_children(df: DataFrame, bottom_level: int, level_fn: LevelFunc, child_fn
             if children.empty:
                 continue
 
-            df.loc[index, land_cover_names] = children[land_cover_names].sum()
+            df.loc[index, habitat_names] = children[habitat_names].sum()
 
 
 def process(tif_file_names: list[str],
@@ -195,22 +174,29 @@ def process(tif_file_names: list[str],
     For each raster tile, calculate the values for each land cover class that partially or wholly intersects the given polygon.
     """
 
-    for name in land_cover_names:
+    for name in habitat_names:
         df[name] = 0.0
 
     df["Unknown"] = 0.0
     df["total_area"] = 0.0
 
-    s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+    df = df.to_crs(crs="EPSG:3035")
 
     print("Processing")
     tiff_progress_bar = trange(len(tif_file_names))
     for idx in tiff_progress_bar:
         tiff_progress_bar.set_postfix_str(f"{humanize.naturalsize(max_memory_usage)}")
         src_file_name = Path("./.cache/" + Path(tif_file_names[idx]).name)
+        tiff_progress_bar.set_description_str(f"{src_file_name.name}")
 
         if not src_file_name.exists():
-            s3.download_file(s3_bucket, tif_file_names[idx], str(src_file_name.resolve()))
+            response = requests.get(tif_file_names[idx], verify=False, stream=True)
+            if response.status_code == 200:
+                with open(src_file_name, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            else:
+                continue
 
         ds = rasterio.open(src_file_name)
         ds_bbox = box(*ds.bounds)
@@ -229,6 +215,7 @@ def process(tif_file_names: list[str],
 
     sum_children(df, bottom_level, level_fn, child_fn, code_column_name)
     calculate_total_area(df)
+    df = df.to_crs(crs="EPSG:3857")
 
     file_names = output_by_level(bottom_level, df, level_fn, output_path)
     print("Done")
