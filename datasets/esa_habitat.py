@@ -27,7 +27,7 @@ from datasets.utils import (
 )
 
 HABITAT_CLASSES = {
-    20000: "Costal Habitats",
+    20000: "Coastal Habitats",
     30000: "Inland Surface Waters",
     40000: "Mires, bogs and fens",
     50000: "Grasslands and lands dominated by forbs, mosses or lichens",
@@ -77,7 +77,7 @@ def calculate_total_area(df: DataFrame) -> None:
     # Unzip results
     total_areas, unknowns = zip(*results)
 
-    df["total_area"] = total_areas
+    df["total"] = total_areas
     df["Unknown"] = unknowns
 
 
@@ -151,14 +151,16 @@ def sum_children(df: DataFrame, bottom_level: int, level_fn: LevelFunc, child_fn
 
     for level in level_progress_bar:
         level_df = df[level_fn(df, level - 1)]
+
         for index, nut in tqdm(level_df.iterrows(), total=level_df.shape[0], leave=False):
             code = nut[code_column_name]
-            children = df[child_fn(df, code)]
+            children = df[child_fn(df, code) & df["touched"]]
 
             if children.empty:
                 continue
 
             df.loc[index, habitat_names] = children[habitat_names].sum()
+            df.loc[index, "touched"] = True
 
 
 def process(tif_file_names: list[str],
@@ -178,7 +180,8 @@ def process(tif_file_names: list[str],
         df[name] = 0.0
 
     df["Unknown"] = 0.0
-    df["total_area"] = 0.0
+    df["total"] = 0.0
+    df["touched"] = False
 
     df = df.to_crs(crs="EPSG:3035")
 
@@ -207,6 +210,7 @@ def process(tif_file_names: list[str],
             ds.close()
             continue
 
+        intersections["touched"] = True
         results = calculate_values(ds, intersections)
 
         df.loc[results.index] = results
@@ -214,8 +218,11 @@ def process(tif_file_names: list[str],
         ds.close()
 
     sum_children(df, bottom_level, level_fn, child_fn, code_column_name)
+    df = df[df["touched"]]
     calculate_total_area(df)
-    df = df.to_crs(crs="EPSG:3857")
+    df = df.to_crs(crs="EPSG:4326")
+
+    df.drop(columns=["touched"], axis=1, inplace=True)
 
     file_names = output_by_level(bottom_level, df, level_fn, output_path)
     print("Done")

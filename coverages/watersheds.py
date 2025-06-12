@@ -13,7 +13,7 @@ from datasets.utils import create_directories
 from inject_metadata import inject_metadata, MetadataIn
 
 
-metadata = MetadataIn(identifierKey="HYBAS_ID", nameKey="HYBAS_ID", levelKey="level", childrenKey="children", attributeKeys=[])
+metadata = MetadataIn(identifierKey="HYBAS_ID", nameKey="HYBAS_ID", levelKey="level", childrenKey="children", attributeKeys=[], units="unknown")
 
 
 def hydrosheds_level_func(df: DataFrame, level: int) -> Series:
@@ -72,6 +72,7 @@ def process_worldcover():
     from datasets.worldcover import get_tile_keys, process, attribute_keys
 
     metadata.attributeKeys = attribute_keys()
+    metadata.units = "km²"
 
     create_directories()
     geom_df = gpd.read_file("input/hybas_eu_lev01-12_v1c.fgb", engine="pyogrio")
@@ -95,6 +96,7 @@ def process_worldsoils():
     from datasets.worldsoils import get_tile_keys, process, coverage_id, attribute_keys
 
     metadata.attributeKeys = attribute_keys()
+    metadata.units = "dg/kg"
 
     create_directories()
     geom_df = gpd.read_file("input/hybas_eu_lev01-12_v1c.fgb", engine="pyogrio")

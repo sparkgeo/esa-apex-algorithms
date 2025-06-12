@@ -13,7 +13,7 @@ from datasets.utils import create_directories
 from inject_metadata import inject_metadata, MetadataIn
 
 
-metadata = MetadataIn(identifierKey="SITECODE", nameKey="SITENAME", levelKey="level", childrenKey="children", attributeKeys=[])
+metadata = MetadataIn(identifierKey="SITECODE", nameKey="SITENAME", levelKey="level", childrenKey="children", attributeKeys=[], units="unknown")
 
 
 def natura_level_func(df: DataFrame, level: int) -> Series:
@@ -79,6 +79,7 @@ def process_worldcover():
     from datasets.worldcover import get_tile_keys, process, attribute_keys
 
     metadata.attributeKeys = attribute_keys()
+    metadata.units = "km²"
 
     create_directories()
     geom_df = gpd.read_file("input/Natura2000_end2023.gpkg", layer="NaturaSite_polygon", engine="pyogrio")
@@ -104,6 +105,7 @@ def process_worldsoils():
     from datasets.worldsoils import get_tile_keys, process, coverage_id, attribute_keys
 
     metadata.attributeKeys = attribute_keys()
+    metadata.units = "dg/kg"
 
     create_directories()
     geom_df = gpd.read_file("input/Natura2000_end2023.gpkg", layer="NaturaSite_polygon", engine="pyogrio")

@@ -200,7 +200,7 @@ def sum_children(df: DataFrame, bottom_level: int, level_fn: LevelFunc, child_fn
 
         for index, nut in tqdm(level_df.iterrows(), total=level_df.shape[0], leave=False):
             code = nut[code_column_name]
-            children = df[child_fn(df, code)]
+            children = df[child_fn(df, code) & df["touched"]]
 
             if children.empty:
                 continue
@@ -209,10 +209,11 @@ def sum_children(df: DataFrame, bottom_level: int, level_fn: LevelFunc, child_fn
             df.loc[index, "soil_max"] = children["soil_max"].max()
             df.loc[index, "value_sum"] = children["value_sum"].sum()
             df.loc[index, "sample_count"] = children["sample_count"].sum()
+            df.loc[index, "touched"] = True
 
 
 def process(wcs_params: list[tuple],
-            stats_df: DataFrame,
+            df: DataFrame,
             bottom_level: int,
             level_fn: LevelFunc,
             child_fn: ChildFunc,
@@ -224,10 +225,11 @@ def process(wcs_params: list[tuple],
     For each raster tile, calculate the soil organic carbon that partially or wholly intersects the given polygon.
     """
 
-    stats_df["soil_min"] = float("inf")
-    stats_df["soil_max"] = -float("inf")
-    stats_df["value_sum"] = 0.0
-    stats_df["sample_count"] = 0
+    df["soil_min"] = float("inf")
+    df["soil_max"] = -float("inf")
+    df["value_sum"] = 0.0
+    df["sample_count"] = 0
+    df["touched"] = False
 
     print("Processing")
     tiff_progress_bar = trange(len(wcs_params))
@@ -248,23 +250,26 @@ def process(wcs_params: list[tuple],
         ds = rasterio.open(src_file_name)
         ds_bbox = box(*ds.bounds)
 
-        intersections = intersection_fn(ds_bbox, stats_df, bottom_level)
+        intersections = intersection_fn(ds_bbox, df, bottom_level)
 
         if len(intersections) == 0:
             ds.close()
             continue
 
+        intersections["touched"] = True
         results = calculate_values(ds, intersections)
-        stats_df.loc[results.index] = results
+        df.loc[results.index] = results
 
         ds.close()
 
-    sum_children(stats_df, bottom_level, level_fn, child_fn, code_column_name)
-    calculate_mean(stats_df)
+    sum_children(df, bottom_level, level_fn, child_fn, code_column_name)
+    df = df[df["touched"]]
+    calculate_mean(df)
+    df = df.to_crs(crs="EPSG:4326")
 
-    stats_df.drop(columns=["value_sum", "sample_count"], axis=1, inplace=True)
+    df.drop(columns=["value_sum", "sample_count", "touched"], axis=1, inplace=True)
 
-    file_names = output_by_level(bottom_level, stats_df, level_fn, output_path)
+    file_names = output_by_level(bottom_level, df, level_fn, output_path)
     print("Done")
 
     return file_names

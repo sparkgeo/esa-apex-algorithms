@@ -3,6 +3,7 @@ import psutil
 from pathlib import Path
 from collections.abc import Callable
 from pandas import DataFrame, Series
+from geopandas import GeoDataFrame
 from shapely import box
 from tqdm import trange
 from pyproj import Geod
@@ -15,7 +16,7 @@ geod = Geod(ellps="WGS84")
 max_memory_usage = 0
 
 
-def output_by_level(max_level: int, df: DataFrame, level_fn: LevelFunc, file_path: Path) -> list[Path]:
+def output_by_level(max_level: int, df: GeoDataFrame, level_fn: LevelFunc, file_path: Path) -> list[Path]:
     """
     Splits the input DataFrame into multiple files based on the level.
     """
@@ -27,9 +28,9 @@ def output_by_level(max_level: int, df: DataFrame, level_fn: LevelFunc, file_pat
 
         if not level.has_sindex:
             _ = level.sindex
-            
+
         suffix = file_path.suffix
-        file_name = file_path.with_suffix(f".level{i:02}{suffix}")
+        file_name = file_path.with_suffix(f".level{i:02}.{''.join(df.crs.to_authority())}{suffix}")
         output_file_names.append(file_name)
         level.to_file(file_name)
 

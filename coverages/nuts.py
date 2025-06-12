@@ -14,6 +14,9 @@ from datasets.worldsoils import coverage_id
 from inject_metadata import inject_metadata, MetadataIn
 
 
+metadata = MetadataIn(identifierKey="NUTS_ID", nameKey="NUTS_NAME", levelKey="LEVL_CODE", childrenKey="children", attributeKeys=[], units="unknown")
+
+
 def nuts_level_func(df: DataFrame, level: int) -> Series:
     """
     Filters the input DataFrame based on a specified NUTS level.
@@ -79,11 +82,7 @@ def nuts_intersections(bbox: box, df: DataFrame, level: int) -> DataFrame:
         A filtered DataFrame with rows satisfying the intersection
         and level conditions.
     """
-    return df[
-        (df.geometry.intersects(bbox)) & (df["children"] == "")
-        ]
-
-metadata = MetadataIn(identifierKey="NUTS_ID", nameKey="NUTS_NAME", levelKey="LEVL_CODE", childrenKey="children", attributeKeys=[])
+    return df[(df.geometry.intersects(bbox)) & (df["children"] == "")]
 
 
 def process_esa_habitat():
@@ -96,9 +95,11 @@ def process_esa_habitat():
     from datasets.esa_habitat import get_tile_keys, process, attribute_keys
 
     metadata.attributeKeys = attribute_keys()
+    metadata.units = "km²"
 
     create_directories()
     geom_df = gpd.read_file("input/NUTS_with_children.fgb", engine="pyogrio")
+    # geom_df = nuts_intersections(geom_df, 3)
     keys = get_tile_keys(geom_df, 0, nuts_level_func)
     file_names = process(
         keys,
@@ -125,6 +126,7 @@ def process_worldcover():
     from datasets.worldcover import get_tile_keys, process, attribute_keys
 
     metadata.attributeKeys = attribute_keys()
+    metadata.units = "km²"
 
     create_directories()
     geom_df = gpd.read_file("input/NUTS_with_children.fgb", engine="pyogrio")
@@ -156,6 +158,7 @@ def process_worldsoils():
     from datasets.worldsoils import get_tile_keys, process, attribute_keys
 
     metadata.attributeKeys = attribute_keys()
+    metadata.units = "dg/kg"
 
     create_directories()
     geom_df = gpd.read_file("input/NUTS_with_children.fgb", engine="pyogrio")

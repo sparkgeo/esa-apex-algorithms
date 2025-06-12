@@ -15,6 +15,7 @@ class MetadataIn(BaseModel):
     levelKey: str
     childrenKey: str
     attributeKeys: list[str]
+    units: str
 
 
 class MetadataOut(BaseModel):
@@ -23,6 +24,7 @@ class MetadataOut(BaseModel):
     levelKey: str
     childrenKey: str
     attributeKeys: list[int]
+    units: str
 
     # FGB metadata fields can only be strings.
     @field_serializer("attributeKeys")
@@ -68,7 +70,8 @@ def inject_metadata(fgb_file_path: Path, metadata: MetadataIn):
         nameKey=metadata.nameKey,
         levelKey=metadata.levelKey,
         attributeKeys=attribute_column_indices,
-        childrenKey=metadata.childrenKey
+        childrenKey=metadata.childrenKey,
+        units=metadata.units
     )
 
     # Overwrite the input file.
