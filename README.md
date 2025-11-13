@@ -1,3 +1,11 @@
+# This project has been archived!
+
+Better and more up-to-date repositories can be found here:
+
+- https://github.com/sparkgeo/apex-convert-boundaries
+- https://github.com/sparkgeo/apex-create-constraints
+- https://github.com/sparkgeo/apex-build-statistics
+
 # APEX statistics preprocessor
 
 This repository contains algorithms developed by Sparkgeo for the European Space Agency's APEX project.
